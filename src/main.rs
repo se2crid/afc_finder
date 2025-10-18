@@ -537,10 +537,16 @@ fn main() {
         options.renderer = eframe::Renderer::Glow;
     }
 
-    let icon_bytes: &[u8] = include_bytes!("../icon.png");
-
-    let d = eframe::icon_data::from_png_bytes(icon_bytes).expect("The icon data must be valid");
-    options.viewport.icon = Some(std::sync::Arc::new(d));
+    #[cfg(target_os = "macos")]
+    {
+        options.viewport.icon = Some(std::sync::Arc::new(egui::IconData::default()));
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let icon_bytes: &[u8] = include_bytes!("../icon.png");
+        let d = eframe::icon_data::from_png_bytes(icon_bytes).expect("The icon data must be valid");
+        options.viewport.icon = Some(std::sync::Arc::new(d));
+    }
 
     eframe::run_native(
         &format!("AFC Finder v{}", env!("CARGO_PKG_VERSION")),
