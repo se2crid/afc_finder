@@ -606,6 +606,8 @@ struct AfcState {
     apps_loading: bool,
     upload_progress: Option<(String, f32)>,
     download_progress: Option<(String, f32)>,
+    sort_column: SortColumn,
+    sort_direction: SortDirection,
 }
 
 #[derive(Clone, Debug)]
@@ -613,6 +615,36 @@ pub struct AfcItem {
     pub name: String,
     pub info: FileInfo,
 }
+
+fn format_size(bytes: usize) -> String {
+    if bytes < 1024 {
+        format!("{} B", bytes)
+    } else if bytes < 1024 * 1024 {
+        format!("{:.1} KB", bytes as f32 / 1024.0)
+    } else if bytes < 1024 * 1024 * 1024 {
+        format!("{:.1} MB", bytes as f32 / (1024.0 * 1024.0))
+    } else {
+        format!("{:.1} GB", bytes as f32 / (1024.0 * 1024.0 * 1024.0))
+    }
+}
+
+// Add state for sorting
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+enum SortColumn {
+    #[default]
+    Name,
+    Size,
+    Modified,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+enum SortDirection {
+    #[default]
+    Ascending,
+    Descending,
+}
+
+// Implement Default for SortColumn and SortDirection if needed, or initialize in AfcState::default()
 
 impl eframe::App for MyApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
@@ -1144,48 +1176,132 @@ impl MyApp {
             });
             ui.separator();
 
-            // Directory Listing
-            egui::ScrollArea::vertical().show(ui, |ui| match &self.afc_state.directory_listing {
-                Some(Ok(items)) => {
-                    for afc_item in items {
-                        // The item name is now a field
-                        let item_name = &afc_item.name;
-
-                        // Correctly check if it's a directory
-                        let is_dir = afc_item.info.st_ifmt == "S_IFDIR";
-                        let icon = if is_dir { "📁" } else { "📄" };
-                        let label = format!("{} {}", icon, item_name);
-
-                        let response = ui.selectable_label(
-                            self.afc_state.selected_item.as_deref() == Some(item_name),
-                            label,
-                        );
-
-                        if response.clicked() {
-                            // Store just the name string in selected_item
-                            self.afc_state.selected_item = Some(item_name.clone());
-                        }
-
-                        if response.double_clicked() && is_dir {
-                            self.afc_state.status_message = "Loading directory...".to_string();
-                            self.afc_state.current_path = Path::new(&self.afc_state.current_path)
-                                .join(item_name) // Use item_name
-                                .to_string_lossy()
-                                .to_string();
-
-                            self.afc_sender
-                                .send(AfcCommands::ListDirectory(
-                                    self.afc_state.current_path.clone(),
-                                ))
-                                .unwrap();
+            egui::Grid::new("directory_header")
+                .num_columns(3)
+                .striped(false) // No stripes for header
+                .show(ui, |ui| {
+                    // Clickable Header: Name
+                    if ui.button("Name").clicked() {
+                        if self.afc_state.sort_column == SortColumn::Name {
+                            self.afc_state.sort_direction = match self.afc_state.sort_direction {
+                                SortDirection::Ascending => SortDirection::Descending,
+                                SortDirection::Descending => SortDirection::Ascending,
+                            };
+                        } else {
+                            self.afc_state.sort_column = SortColumn::Name;
+                            self.afc_state.sort_direction = SortDirection::Ascending;
                         }
                     }
-                }
-                Some(Err(e)) => {
-                    ui.colored_label(Color32::RED, e);
-                }
-                None => {
-                    ui.label("Loading directory...");
+                    // Clickable Header: Size
+                    if ui.button("Size").clicked() {
+                        if self.afc_state.sort_column == SortColumn::Size {
+                            self.afc_state.sort_direction = match self.afc_state.sort_direction {
+                                SortDirection::Ascending => SortDirection::Descending,
+                                SortDirection::Descending => SortDirection::Ascending,
+                            };
+                        } else {
+                            self.afc_state.sort_column = SortColumn::Size;
+                            self.afc_state.sort_direction = SortDirection::Ascending;
+                        }
+                    }
+                    // Clickable Header: Date Modified
+                    if ui.button("Date Modified").clicked() {
+                        if self.afc_state.sort_column == SortColumn::Modified {
+                            self.afc_state.sort_direction = match self.afc_state.sort_direction {
+                                SortDirection::Ascending => SortDirection::Descending,
+                                SortDirection::Descending => SortDirection::Ascending,
+                            };
+                        } else {
+                            self.afc_state.sort_column = SortColumn::Modified;
+                            self.afc_state.sort_direction = SortDirection::Ascending;
+                        }
+                    }
+                    ui.end_row();
+                });
+
+            // Directory Listing
+            egui::ScrollArea::vertical().show(ui, |ui| {
+                match &mut self.afc_state.directory_listing {
+                    // Need mutable access to sort
+                    Some(Ok(items)) => {
+                        // --- Apply Sorting ---
+                        let sort_col = self.afc_state.sort_column;
+                        let sort_dir = self.afc_state.sort_direction;
+                        items.sort_by(|a, b| {
+                            let ordering = match sort_col {
+                                SortColumn::Name => {
+                                    a.name.to_lowercase().cmp(&b.name.to_lowercase())
+                                }
+                                SortColumn::Size => a.info.size.cmp(&b.info.size),
+                                SortColumn::Modified => a.info.modified.cmp(&b.info.modified),
+                            };
+                            match sort_dir {
+                                SortDirection::Ascending => ordering,
+                                SortDirection::Descending => ordering.reverse(),
+                            }
+                        });
+                        // --- End Sorting ---
+
+                        // Display using Grid
+                        egui::Grid::new("directory_listing_grid")
+                            .num_columns(3)
+                            .striped(true) // Enable stripes for items
+                            .show(ui, |ui| {
+                                for afc_item in items {
+                                    let item_name = &afc_item.name;
+                                    let is_dir = afc_item.info.st_ifmt == "S_IFDIR";
+                                    let icon = if is_dir { "📁" } else { "📄" };
+                                    let label_text = format!("{} {}", icon, item_name);
+
+                                    // Create a selectable label for the name column
+                                    let name_label = egui::Button::selectable(
+                                        self.afc_state.selected_item.as_deref() == Some(item_name),
+                                        label_text,
+                                    );
+                                    let response = ui.add(name_label);
+
+                                    // Handle clicks on the name label
+                                    if response.clicked() {
+                                        self.afc_state.selected_item = Some(item_name.clone());
+                                    }
+                                    if response.double_clicked() && is_dir {
+                                        self.afc_state.status_message =
+                                            "Loading directory...".to_string();
+                                        self.afc_state.current_path =
+                                            Path::new(&self.afc_state.current_path)
+                                                .join(item_name)
+                                                .to_string_lossy()
+                                                .to_string();
+                                        self.afc_sender
+                                            .send(AfcCommands::ListDirectory(
+                                                self.afc_state.current_path.clone(),
+                                            ))
+                                            .unwrap();
+                                    }
+
+                                    // Size Column (show "--" for directories)
+                                    let size_str = if is_dir {
+                                        "--".to_string()
+                                    } else {
+                                        format_size(afc_item.info.size)
+                                    };
+                                    ui.label(size_str);
+
+                                    // Modified Date Column
+                                    let modified_str =
+                                        afc_item.info.modified.format("%Y-%m-%d %H:%M").to_string();
+                                    ui.label(modified_str);
+
+                                    ui.end_row();
+                                }
+                            });
+                    }
+                    Some(Err(e)) => {
+                        ui.colored_label(Color32::RED, e);
+                    }
+                    None => {
+                        ui.label("Loading directory...");
+                    }
                 }
             });
         });
