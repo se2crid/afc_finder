@@ -14,6 +14,7 @@ use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 use idevice::{
     IdeviceError, IdeviceService,
     afc::{AfcClient, FileInfo, opcode::AfcFopenMode},
+    crashreportcopymobile::CrashReportCopyMobileClient,
     house_arrest::HouseArrestClient,
     installation_proxy::InstallationProxyClient,
     lockdown::LockdownClient,
@@ -120,6 +121,12 @@ fn main() {
                         AfcMode::Container(bundle_id) => {
                             match HouseArrestClient::connect(&*provider).await {
                                 Ok(h) => h.vend_container(&bundle_id).await,
+                                Err(e) => Err(e),
+                            }
+                        }
+                        AfcMode::CrashReports => {
+                            match CrashReportCopyMobileClient::connect(&*provider).await {
+                                Ok(c) => Ok(c.to_afc_client()),
                                 Err(e) => Err(e),
                             }
                         }
@@ -543,6 +550,7 @@ enum AfcMode {
     Root,
     Documents(String),
     Container(String),
+    CrashReports,
 }
 
 enum AfcCommands {
@@ -816,7 +824,8 @@ impl MyApp {
             ui.heading("Connect to AFC");
             ui.separator();
 
-            let requires_bundle_id = !matches!(self.afc_state.afc_mode, AfcMode::Root);
+            let requires_bundle_id = !matches!(self.afc_state.afc_mode, AfcMode::Root,)
+                && !matches!(self.afc_state.afc_mode, AfcMode::CrashReports);
 
             // Trigger app fetch if needed and not already loading/loaded
             if requires_bundle_id
@@ -844,6 +853,11 @@ impl MyApp {
                 &mut self.afc_state.afc_mode,
                 AfcMode::Container("".into()), // Use dummy value
                 "Application Container",
+            );
+            ui.radio_value(
+                &mut self.afc_state.afc_mode,
+                AfcMode::CrashReports,
+                "Crash Repots",
             );
 
             if requires_bundle_id {
@@ -928,6 +942,7 @@ impl MyApp {
                     AfcMode::Container(_) => {
                         AfcMode::Container(self.afc_state.bundle_id_input.clone())
                     }
+                    AfcMode::CrashReports => AfcMode::CrashReports,
                 };
                 self.afc_sender
                     .send(AfcCommands::Connect(dev.clone(), mode))

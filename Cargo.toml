@@ -4,8 +4,8 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-idevice = { path = "../idevice/idevice", features = [
-  "pair",
+idevice = { version = "0.1.45", features = [
+  "crashreportcopymobile",
   "usbmuxd",
   "installation_proxy",
   "afc",
