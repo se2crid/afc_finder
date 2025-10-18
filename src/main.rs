@@ -522,9 +522,29 @@ fn main() {
         }
     });
 
+    let mut options = eframe::NativeOptions::default();
+    // Smoother drag/resize on Windows/Linux
+    #[cfg(any(target_os = "windows", target_os = "linux"))]
+    {
+        options.vsync = false;
+        options.run_and_return = false;
+        options.wgpu_options.present_mode = wgpu::PresentMode::AutoNoVsync;
+    }
+
+    // Prefer GL only on macOS Intel
+    #[cfg(all(target_os = "macos", target_arch = "x86_64"))]
+    {
+        options.renderer = eframe::Renderer::Glow;
+    }
+
+    let icon_bytes: &[u8] = include_bytes!("../icon.png");
+
+    let d = eframe::icon_data::from_png_bytes(icon_bytes).expect("The icon data must be valid");
+    options.viewport.icon = Some(std::sync::Arc::new(d));
+
     eframe::run_native(
         &format!("AFC Finder v{}", env!("CARGO_PKG_VERSION")),
-        eframe::NativeOptions::default(),
+        options,
         Box::new(|c| {
             let ctx = c.egui_ctx.clone();
             rt.spawn(async move {
