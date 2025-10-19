@@ -2075,8 +2075,7 @@ dependencies = [
 [[package]]
 name = "idevice"
 version = "0.1.45"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "eedb6dccf7ef24f7a5bc3f05af5f31c604951958256e05febc7efa4196d67856"
+source = "git+https://github.com/jkcoxson/idevice?rev=c10f4da9f1ee510f5c090e75457cd24ecb17c668#c10f4da9f1ee510f5c090e75457cd24ecb17c668"
 dependencies = [
  "async_zip",
  "base64",

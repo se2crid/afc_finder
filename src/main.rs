@@ -8,7 +8,8 @@ use std::{
 };
 
 use egui::{Color32, ComboBox, TextEdit};
-use log::error;
+use log::{error, warn};
+use futures_util::StreamExt;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 
 use idevice::{
@@ -18,7 +19,7 @@ use idevice::{
     house_arrest::HouseArrestClient,
     installation_proxy::InstallationProxyClient,
     lockdown::LockdownClient,
-    usbmuxd::{UsbmuxdAddr, UsbmuxdConnection, UsbmuxdDevice},
+    usbmuxd::{UsbmuxdAddr, UsbmuxdConnection, UsbmuxdDevice, UsbmuxdListenEvent},
 };
 use rfd::FileDialog;
 
@@ -32,13 +33,48 @@ fn main() {
     // Start with an initial device scan
     idevice_sender.send(IdeviceCommands::GetDevices).unwrap();
 
+    // usbmuxd hot-plug listener to auto-refresh device list (non-Send stream -> own thread)
+    let idevice_sender_listen = idevice_sender.clone();
+    std::thread::spawn(move || {
+        let rt_local = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        rt_local.block_on(async move {
+            loop {
+                match UsbmuxdConnection::default().await {
+                    Ok(mut uc) => match uc.listen().await {
+                        Ok(mut stream) => {
+                            while let Some(evt) = stream.next().await {
+                                match evt {
+                                    Ok(UsbmuxdListenEvent::Connected(_))
+                                    | Ok(UsbmuxdListenEvent::Disconnected(_)) => {
+                                        let _ = idevice_sender_listen
+                                            .send(IdeviceCommands::GetDevices);
+                                    }
+                                    Err(e) => {
+                                        warn!("usbmuxd listen error: {:?}", e);
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+                        Err(e) => warn!("Failed to start usbmuxd listen: {:?}", e),
+                    },
+                    Err(e) => warn!("Failed to connect to usbmuxd for listening: {:?}", e),
+                }
+                // quick reconnect backoff on error only
+                tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+            }
+        });
+    });
+
     let self_afc_sender = afc_sender.clone();
     let app = MyApp {
         devices: None,
         devices_placeholder: "Loading...".to_string(),
         selected_device: "".to_string(),
         gui_recv,
-        idevice_sender: idevice_sender.clone(),
         afc_sender,
         app_sender,
         show_logs: false,
@@ -619,7 +655,6 @@ struct MyApp {
     selected_device: String,
     afc_state: AfcState,
     gui_recv: UnboundedReceiver<GuiCommands>,
-    idevice_sender: UnboundedSender<IdeviceCommands>,
     afc_sender: UnboundedSender<AfcCommands>,
     app_sender: UnboundedSender<AppCommands>,
     show_logs: bool,
@@ -693,6 +728,15 @@ impl eframe::App for MyApp {
                     self.devices_placeholder = format!("Failed to get device list: {:?}", err);
                 }
                 GuiCommands::Devices(devs) => {
+                    // If the previously selected device vanished, clear selection and disconnect
+                    if !self.selected_device.is_empty() && !devs.contains_key(&self.selected_device) {
+                        self.selected_device.clear();
+                        self.afc_state = AfcState::default();
+                        let _ = self.afc_sender.send(AfcCommands::Disconnect);
+                        self.afc_state.status_message = "Device disconnected".to_string();
+                    }
+
+                    // Auto-select when exactly one device is present and none is selected
                     if self.selected_device.is_empty()
                         && devs.len() == 1
                         && let Some(name) = devs.keys().next()
@@ -700,10 +744,16 @@ impl eframe::App for MyApp {
                         self.selected_device = name.clone();
                         // Reset AFC state when auto-selecting
                         self.afc_state = AfcState::default();
-                        self.afc_sender.send(AfcCommands::Disconnect).unwrap();
+                        let _ = self.afc_sender.send(AfcCommands::Disconnect);
                     }
 
-                    self.devices = Some(devs);
+                    // Update device map; if empty, set None so UI shows placeholder
+                    if devs.is_empty() {
+                        self.devices = None;
+                        self.devices_placeholder = "No devices detected".to_string();
+                    } else {
+                        self.devices = Some(devs);
+                    }
                 }
                 GuiCommands::InstalledApps(result) => {
                     self.afc_state.installed_apps = Some(result);
@@ -772,30 +822,26 @@ impl eframe::App for MyApp {
                 ui.heading("AFC Finder");
                 ui.separator();
                 if let Some(devs) = &self.devices {
-                    ComboBox::from_label("Device")
-                        .selected_text(&self.selected_device)
-                        .show_ui(ui, |ui| {
-                            for name in devs.keys() {
-                                if ui
-                                    .selectable_value(&mut self.selected_device, name.clone(), name)
-                                    .clicked()
-                                {
-                                    // Disconnect if we switch devices
-                                    self.afc_state = AfcState::default();
-                                    self.afc_sender.send(AfcCommands::Disconnect).unwrap();
+                    if devs.is_empty() {
+                        ui.label(&self.devices_placeholder);
+                    } else {
+                        ComboBox::from_label("Device")
+                            .selected_text(&self.selected_device)
+                            .show_ui(ui, |ui| {
+                                for name in devs.keys() {
+                                    if ui
+                                        .selectable_value(&mut self.selected_device, name.clone(), name)
+                                        .clicked()
+                                    {
+                                        // Disconnect if we switch devices
+                                        self.afc_state = AfcState::default();
+                                        self.afc_sender.send(AfcCommands::Disconnect).unwrap();
+                                    }
                                 }
-                            }
-                        });
+                            });
+                    }
                 } else {
                     ui.label(&self.devices_placeholder);
-                }
-
-                if ui.button("Refresh Devices").clicked() {
-                    self.selected_device = "".to_string();
-                    self.afc_state = AfcState::default();
-                    self.idevice_sender
-                        .send(IdeviceCommands::GetDevices)
-                        .unwrap();
                 }
 
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
